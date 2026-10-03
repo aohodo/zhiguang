@@ -92,7 +92,9 @@ services:
 
   backend:
     build:
-      context: ./backend
+      context: .
+      dockerfile: Dockerfile
+      target: backend
     env_file:
       - path: ./.env
         required: false
@@ -144,7 +146,9 @@ services:
 
   frontend:
     build:
-      context: ./frontend/zhiguang_fe-main
+      context: .
+      dockerfile: Dockerfile
+      target: frontend
     depends_on:
       - backend
     ports:

@@ -1,0 +1,14 @@
+.git
+.gitignore
+.env
+.env.*
+.docker-data
+**/target
+**/node_modules
+**/dist
+**/.idea
+**/.vscode
+**/*.iml
+**/.DS_Store
+backend/*.zip
+frontend/*.zip
