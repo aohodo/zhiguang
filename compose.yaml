@@ -15,8 +15,8 @@ services:
       - --binlog-row-image=FULL
     volumes:
       - ./.docker-data/mysql:/var/lib/mysql
-      - ./backend/zhiguang_be-main/db/canal-user.sql:/docker-entrypoint-initdb.d/00-canal-user.sql:ro
-      - ./backend/zhiguang_be-main/db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./backend/db/canal-user.sql:/docker-entrypoint-initdb.d/00-canal-user.sql:ro
+      - ./backend/db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
       interval: 5s
@@ -92,7 +92,7 @@ services:
 
   backend:
     build:
-      context: ./backend/zhiguang_be-main
+      context: ./backend
     env_file:
       - path: ./.env
         required: false
