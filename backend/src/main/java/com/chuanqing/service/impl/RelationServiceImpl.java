@@ -3,7 +3,6 @@ package com.chuanqing.service.impl;
 import com.chuanqing.mapper.RelationMapper;
 import com.chuanqing.service.RelationService;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.chuanqing.entity.RelationEventEntity;
 import com.chuanqing.mapper.OutboxMapper;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
@@ -12,6 +11,7 @@ import org.springframework.transaction.annotation.Transactional;
 import com.chuanqing.mapper.UserMapper;
 import com.chuanqing.entity.UserEntity;
 import com.chuanqing.vo.ProfileVO;
+import com.chuanqing.utils.SnowflakeIdGeneratorUtils;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -22,7 +22,6 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.sql.Timestamp;
 import java.util.Date;
-import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.IntFunction;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
@@ -47,6 +46,7 @@ public class RelationServiceImpl implements RelationService {
     private final Cache<Long, List<Long>> flwsTopCache;
     private final Cache<Long, List<Long>> fansTopCache;
     private final UserMapper userMapper;
+    private final SnowflakeIdGeneratorUtils idGenerator;
     
 
     /**
@@ -60,7 +60,8 @@ public class RelationServiceImpl implements RelationService {
                                OutboxMapper outboxMapper,
                                StringRedisTemplate redis,
                                ObjectMapper objectMapper,
-                               UserMapper userMapper) {
+                               UserMapper userMapper,
+                               SnowflakeIdGeneratorUtils idGenerator) {
         this.mapper = mapper;
         this.outboxMapper = outboxMapper;
         this.redis = redis;
@@ -71,6 +72,7 @@ public class RelationServiceImpl implements RelationService {
         this.flwsTopCache = Caffeine.newBuilder().maximumSize(1000).expireAfterWrite(Duration.ofMinutes(10)).build();
         this.fansTopCache = Caffeine.newBuilder().maximumSize(1000).expireAfterWrite(Duration.ofMinutes(10)).build();
         this.userMapper = userMapper;
+        this.idGenerator = idGenerator;
     }
 
     /**
@@ -88,15 +90,11 @@ public class RelationServiceImpl implements RelationService {
             return false;
         }
 
-        long id = ThreadLocalRandom.current().nextLong(Long.MAX_VALUE);
+        long id = idGenerator.nextId();
         int inserted = mapper.insertFollowing(id, fromUserId, toUserId, 1);
 
         if (inserted > 0) {
-            try {
-                Long outId = ThreadLocalRandom.current().nextLong(Long.MAX_VALUE);
-                String payload = objectMapper.writeValueAsString(new RelationEventEntity("FollowCreated", fromUserId, toUserId, id));
-                outboxMapper.insert(outId, "following", id, "FollowCreated", payload);
-            } catch (Exception ignored) {}
+            writeRelationOutbox("FollowCreated", fromUserId, toUserId, id);
 
             return true;
         }
@@ -114,11 +112,7 @@ public class RelationServiceImpl implements RelationService {
     public boolean unfollow(long fromUserId, long toUserId) {
         int updated = mapper.cancelFollowing(fromUserId, toUserId);
         if (updated > 0) {
-            try {
-                Long outId = ThreadLocalRandom.current().nextLong(Long.MAX_VALUE);
-                String payload = objectMapper.writeValueAsString(new RelationEventEntity("FollowCanceled", fromUserId, toUserId, null));
-                outboxMapper.insert(outId, "following", null, "FollowCanceled", payload);
-            } catch (Exception ignored) {}
+            writeRelationOutbox("FollowCanceled", fromUserId, toUserId, null);
             return true;
         }
         return false;
@@ -133,6 +127,29 @@ public class RelationServiceImpl implements RelationService {
     @Override
     public boolean isFollowing(long fromUserId, long toUserId) {
         return mapper.existsFollowing(fromUserId, toUserId) > 0;
+    }
+
+    private void writeRelationOutbox(String eventType, long fromUserId, long toUserId, Long relationId) {
+        long eventId = idGenerator.nextId();
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("eventId", eventId);
+        payload.put("eventType", eventType);
+        payload.put("eventVersion", 1);
+        payload.put("occurredAt", java.time.Instant.now().toString());
+        payload.put("entity", "relation");
+        payload.put("fromUserId", fromUserId);
+        payload.put("toUserId", toUserId);
+        payload.put("id", relationId);
+
+        try {
+            String json = objectMapper.writeValueAsString(payload);
+            int inserted = outboxMapper.insert(eventId, "following", relationId, eventType, json);
+            if (inserted != 1) {
+                throw new IllegalStateException("关系事件写入失败");
+            }
+        } catch (com.fasterxml.jackson.core.JsonProcessingException exception) {
+            throw new IllegalStateException("关系事件序列化失败", exception);
+        }
     }
 
     /**

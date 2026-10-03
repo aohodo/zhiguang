@@ -140,7 +140,7 @@ public class SearchIndexService {
             IndexResponse resp = es.index(req);
             log.info("Indexed post {} result={} version={}", id, resp.result(), resp.version());
         } catch (Exception e) {
-            log.error("Index upsert failed for post {}: {}", id, e.getMessage());
+            throw new IllegalStateException("Index upsert failed for post " + id, e);
         }
     }
 
@@ -160,7 +160,7 @@ public class SearchIndexService {
             );
             es.index(req);
         } catch (Exception e) {
-            log.error("Index soft delete failed for post {}: {}", id, e.getMessage());
+            throw new IllegalStateException("Index soft delete failed for post " + id, e);
         }
     }
 

@@ -114,6 +114,12 @@ logging:
     root: INFO
     '[com.chuanqing]': DEBUG
 
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+
 oss:
   endpoint: ${OSS_ENDPOINT:oss-cn-beijing.aliyuncs.com}
   access-key-id: ${OSS_ACCESS_KEY_ID:disabled}

@@ -9,7 +9,7 @@ import java.time.Duration;
 
 /**
  * 关系事件处理器。
- * 职责：对 FollowCreated/FollowCanceled 事件进行去重、防抖与幂等处理，落库更新粉丝表，维护关注/粉丝 ZSet 缓存与 TTL，并原子更新用户维度计数（SDS）。
+ * 职责：幂等投影 FollowCreated/FollowCanceled 事件，更新粉丝表与关系缓存，并根据数据库事实重建用户计数。
  */
 @Service
 public class RelationEventProcessorService {
@@ -24,18 +24,17 @@ public class RelationEventProcessorService {
     }
 
     /**
-     * 处理关系事件：入库、更新缓存、刷新计数，并进行幂等去重。
+     * 处理关系事件：幂等落库、更新缓存，并从事实数据重建计数。
      * @param evt 关系事件
      */
     public void process(RelationEventEntity evt) {
-        String dk = "dedup:rel:" + evt.type() + ":" + evt.fromUserId() + ":" + evt.toUserId() + ":" + (evt.id() == null ? "0" : String.valueOf(evt.id()));
-        Boolean first = redis.opsForValue().setIfAbsent(dk, "1", Duration.ofMinutes(10));
-
-        // 非首次（存在去重键）直接返回，保证消息幂等
-        if (first == null || !first) {
-            return;
+        if (evt == null || evt.fromUserId() == null || evt.toUserId() == null) {
+            throw new IllegalArgumentException("关系事件缺少必要字段");
         }
         if ("FollowCreated".equals(evt.type())) {
+            if (evt.id() == null) {
+                throw new IllegalArgumentException("关注创建事件缺少关系 ID");
+            }
             // 异步插入粉丝表
             mapper.insertFollower(evt.id(), evt.toUserId(), evt.fromUserId(), 1);
             long now = System.currentTimeMillis();
@@ -46,9 +45,6 @@ public class RelationEventProcessorService {
             redis.expire("uf:flws:" + evt.fromUserId(), Duration.ofHours(2));
             redis.expire("uf:fans:" + evt.toUserId(), Duration.ofHours(2));
 
-            // 更新关注数与粉丝数
-            userCounterService.incrementFollowings(evt.fromUserId(), 1);
-            userCounterService.incrementFollowers(evt.toUserId(), 1);
         } else if ("FollowCanceled".equals(evt.type())) {
             mapper.cancelFollower(evt.toUserId(), evt.fromUserId());
 
@@ -58,9 +54,12 @@ public class RelationEventProcessorService {
             redis.expire("uf:flws:" + evt.fromUserId(), Duration.ofHours(2));
             redis.expire("uf:fans:" + evt.toUserId(), Duration.ofHours(2));
 
-            // 更新关注数与粉丝数
-            userCounterService.incrementFollowings(evt.fromUserId(), -1);
-            userCounterService.incrementFollowers(evt.toUserId(), -1);
+        } else {
+            throw new IllegalArgumentException("不支持的关系事件类型: " + evt.type());
         }
+
+        // 基于数据库事实重建，消息重放不会重复累加计数。
+        userCounterService.rebuildAllCounters(evt.fromUserId());
+        userCounterService.rebuildAllCounters(evt.toUserId());
     }
 }

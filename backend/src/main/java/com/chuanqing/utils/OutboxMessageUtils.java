@@ -36,6 +36,10 @@ public final class OutboxMessageUtils {
         try {
             JsonNode root = objectMapper.readTree(message);
 
+            if (root == null || !root.isObject()) {
+                throw new IllegalArgumentException("Outbox message must be a JSON object");
+            }
+
             JsonNode table = root.get("table");
             if (table == null || !"outbox".equals(table.asText())) {
                 return Collections.emptyList();
@@ -48,13 +52,15 @@ public final class OutboxMessageUtils {
 
             JsonNode data = root.get("data");
             if (data == null || !data.isArray()) {
-                return Collections.emptyList();
+                throw new IllegalArgumentException("Outbox message data must be an array");
             }
             List<JsonNode> rows = new ArrayList<>();
             data.forEach(rows::add);
             return rows;
-        } catch (Exception e) {
-            return Collections.emptyList();
+        } catch (IllegalArgumentException exception) {
+            throw exception;
+        } catch (Exception exception) {
+            throw new IllegalArgumentException("Invalid outbox message", exception);
         }
     }
 }
