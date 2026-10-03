@@ -14,12 +14,12 @@ ENTRYPOINT ["java", "-jar", "/app/app.jar"]
 
 FROM node:22-alpine AS frontend-build
 WORKDIR /workspace
-COPY frontend/zhiguang_fe-main/package.json frontend/zhiguang_fe-main/package-lock.json ./
+COPY frontend/package.json frontend/package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci
-COPY frontend/zhiguang_fe-main/ ./
+COPY frontend/ ./
 RUN npm run build
 
 FROM nginx:1.27-alpine AS frontend
-COPY frontend/zhiguang_fe-main/nginx.conf /etc/nginx/conf.d/default.conf
+COPY frontend/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=frontend-build /workspace/dist /usr/share/nginx/html
 EXPOSE 80
