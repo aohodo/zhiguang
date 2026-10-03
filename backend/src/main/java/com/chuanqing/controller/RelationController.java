@@ -41,7 +41,7 @@ public class RelationController {
      * 发起关注。
      * @param toUserId 被关注的用户ID
      * @param jwt 认证令牌
-     * @return 是否关注成功
+     * @return 是否达到已关注状态；重复关注同样返回 true，限流返回 false
      */
     @PostMapping("/follow")
     public boolean follow(@RequestParam("toUserId") long toUserId, @AuthenticationPrincipal Jwt jwt) {
@@ -53,7 +53,7 @@ public class RelationController {
      * 取消关注。
      * @param toUserId 被取消关注的用户ID
      * @param jwt 认证令牌
-     * @return 是否取消成功
+     * @return 是否达到未关注状态；重复取消同样返回 true
      */
     @PostMapping("/unfollow")
     public boolean unfollow(@RequestParam("toUserId") long toUserId, @AuthenticationPrincipal Jwt jwt) {

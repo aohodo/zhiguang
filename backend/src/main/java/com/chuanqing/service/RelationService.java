@@ -13,14 +13,14 @@ public interface RelationService {
      * 关注操作。
      * @param fromUserId 发起关注的用户ID
      * @param toUserId 被关注的用户ID
-     * @return 是否关注成功
+     * @return 是否达到已关注状态；重复关注同样返回 true，限流返回 false
      */
     boolean follow(long fromUserId, long toUserId);
     /**
      * 取消关注。
      * @param fromUserId 发起取消的用户ID
      * @param toUserId 被取消的用户ID
-     * @return 是否取消成功
+     * @return 是否达到未关注状态；重复取消同样返回 true
      */
     boolean unfollow(long fromUserId, long toUserId);
     /**

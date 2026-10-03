@@ -14,17 +14,28 @@ import java.util.Map;
 @Mapper
 public interface RelationMapper {
     /**
-     * 插入关注关系。
+     * 仅在关系不存在时插入关注关系，由唯一键保证并发下只有一个请求成功。
      * @param id 主键ID
      * @param fromUserId 发起关注的用户ID
      * @param toUserId 被关注的用户ID
-     * @param relStatus 关系状态
      * @return 影响行数
      */
-    int insertFollowing(@Param("id") Long id,
-                        @Param("fromUserId") Long fromUserId,
-                        @Param("toUserId") Long toUserId,
-                        @Param("relStatus") Integer relStatus);
+    int insertFollowingIfAbsent(@Param("id") Long id,
+                                @Param("fromUserId") Long fromUserId,
+                                @Param("toUserId") Long toUserId);
+
+    /**
+     * 将已取消的关系恢复为关注状态。
+     * @return 仅在 0 -> 1 状态转换发生时返回 1
+     */
+    int activateFollowing(@Param("fromUserId") Long fromUserId,
+                          @Param("toUserId") Long toUserId);
+
+    /**
+     * 查询关注关系主键。
+     */
+    Long findFollowingId(@Param("fromUserId") Long fromUserId,
+                         @Param("toUserId") Long toUserId);
 
     /**
      * 取消关注关系（逻辑更新）。

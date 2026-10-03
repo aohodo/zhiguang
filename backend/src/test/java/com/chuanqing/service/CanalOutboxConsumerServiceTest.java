@@ -13,18 +13,14 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.kafka.support.Acknowledgment;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.lenient;
 
 @ExtendWith(MockitoExtension.class)
-class OutboxConsumerServiceTest {
-
-    @Mock
-    private SearchIndexService searchIndexService;
+class CanalOutboxConsumerServiceTest {
 
     @Mock
     private RelationEventProcessorService relationProcessor;
@@ -36,58 +32,34 @@ class OutboxConsumerServiceTest {
     private Acknowledgment acknowledgment;
 
     private ObjectMapper objectMapper;
-    private SearchCanalOutboxConsumerService searchConsumer;
-    private CanalOutboxConsumerService relationConsumer;
+    private CanalOutboxConsumerService consumer;
 
     @BeforeEach
     void setUp() {
         objectMapper = new ObjectMapper();
-        searchConsumer = new SearchCanalOutboxConsumerService(
-                objectMapper,
-                searchIndexService,
-                idempotencyService
-        );
-        relationConsumer = new CanalOutboxConsumerService(
+        consumer = new CanalOutboxConsumerService(
                 objectMapper,
                 relationProcessor,
                 idempotencyService
         );
-        lenient().doAnswer(invocation -> {
-            ((Runnable) invocation.getArgument(2)).run();
-            return true;
-        }).when(idempotencyService).execute(any(), any(), any());
     }
 
     @Test
-    void searchConsumerProcessesThenAcknowledges() throws Exception {
-        ObjectNode payload = objectMapper.createObjectNode();
-        payload.put("eventId", 101L);
-        payload.put("entity", "knowpost");
-        payload.put("op", "upsert");
-        payload.put("id", 9L);
-
-        searchConsumer.onMessage(message(101L, payload), acknowledgment);
-
-        verify(idempotencyService).execute(eq("search"), eq(101L), any());
-        verify(searchIndexService).upsertKnowPost(9L);
-        verify(acknowledgment).acknowledge();
-    }
-
-    @Test
-    void relationConsumerIgnoresKnowpostWithoutBlockingItsGroup() throws Exception {
+    void ignoresKnowpostWithoutBlockingItsGroup() throws Exception {
         ObjectNode payload = objectMapper.createObjectNode();
         payload.put("entity", "knowpost");
         payload.put("op", "upsert");
         payload.put("id", 9L);
 
-        relationConsumer.onMessage(message(102L, payload), acknowledgment);
+        consumer.onMessage(message(102L, payload), acknowledgment);
 
         verify(relationProcessor, never()).process(any());
         verify(acknowledgment).acknowledge();
     }
 
     @Test
-    void relationConsumerProcessesEnvelopeAndAcknowledges() throws Exception {
+    void processesEnvelopeAndAcknowledges() throws Exception {
+        executeIdempotentAction();
         ObjectNode payload = objectMapper.createObjectNode();
         payload.put("eventId", 103L);
         payload.put("entity", "relation");
@@ -96,22 +68,15 @@ class OutboxConsumerServiceTest {
         payload.put("toUserId", 2L);
         payload.put("id", 3L);
 
-        relationConsumer.onMessage(message(103L, payload), acknowledgment);
+        consumer.onMessage(message(103L, payload), acknowledgment);
 
         ArgumentCaptor<RelationEventEntity> eventCaptor = ArgumentCaptor.forClass(RelationEventEntity.class);
+        verify(idempotencyService).execute(eq("relation"), eq(103L), any());
         verify(relationProcessor).process(eventCaptor.capture());
         assertThat(eventCaptor.getValue().type()).isEqualTo("FollowCreated");
         assertThat(eventCaptor.getValue().fromUserId()).isEqualTo(1L);
         assertThat(eventCaptor.getValue().toUserId()).isEqualTo(2L);
         verify(acknowledgment).acknowledge();
-    }
-
-    @Test
-    void malformedMessageThrowsAndIsNotAcknowledged() {
-        assertThatThrownBy(() -> searchConsumer.onMessage("not-json", acknowledgment))
-                .isInstanceOf(IllegalArgumentException.class);
-
-        verify(acknowledgment, never()).acknowledge();
     }
 
     private String message(long eventId, ObjectNode payload) throws Exception {
@@ -124,5 +89,12 @@ class OutboxConsumerServiceTest {
         root.put("type", "INSERT");
         root.set("data", data);
         return objectMapper.writeValueAsString(root);
+    }
+
+    private void executeIdempotentAction() {
+        doAnswer(invocation -> {
+            ((Runnable) invocation.getArgument(2)).run();
+            return true;
+        }).when(idempotencyService).execute(any(), any(), any());
     }
 }

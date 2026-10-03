@@ -1,32 +1,34 @@
 package com.chuanqing.service.impl;
 
-import com.chuanqing.mapper.RelationMapper;
-import com.chuanqing.service.RelationService;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
+import com.chuanqing.common.enums.ErrorCodeEnums;
+import com.chuanqing.entity.UserEntity;
+import com.chuanqing.exception.BusinessException;
 import com.chuanqing.mapper.OutboxMapper;
+import com.chuanqing.mapper.RelationMapper;
+import com.chuanqing.mapper.UserMapper;
+import com.chuanqing.service.RelationService;
+import com.chuanqing.utils.SnowflakeIdGeneratorUtils;
+import com.chuanqing.vo.ProfileVO;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import com.chuanqing.mapper.UserMapper;
-import com.chuanqing.entity.UserEntity;
-import com.chuanqing.vo.ProfileVO;
-import com.chuanqing.utils.SnowflakeIdGeneratorUtils;
 
+import java.nio.charset.StandardCharsets;
+import java.sql.Timestamp;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Date;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.Collections;
-import java.util.LinkedHashMap;
-import java.sql.Timestamp;
-import java.util.Date;
 import java.util.function.IntFunction;
-import com.github.benmanes.caffeine.cache.Cache;
-import com.github.benmanes.caffeine.cache.Caffeine;
-import java.nio.charset.StandardCharsets;
-import org.springframework.data.redis.core.RedisCallback;
 
 /**
  * 关系服务实现。
@@ -47,7 +49,6 @@ public class RelationServiceImpl implements RelationService {
     private final Cache<Long, List<Long>> fansTopCache;
     private final UserMapper userMapper;
     private final SnowflakeIdGeneratorUtils idGenerator;
-    
 
     /**
      * 关系服务实现构造函数。
@@ -79,43 +80,55 @@ public class RelationServiceImpl implements RelationService {
      * 关注操作，限流通过令牌桶，并写入 Outbox 以异步构建缓存与粉丝表。
      * @param fromUserId 发起关注的用户ID
      * @param toUserId 被关注的用户ID
-     * @return 是否关注成功
+     * @return 是否达到已关注状态；重复关注同样返回 true，限流返回 false
      */
     @Override
     @Transactional
     public boolean follow(long fromUserId, long toUserId) {
+        validateRelationCommand(fromUserId, toUserId);
+
         // Lua 脚本令牌桶限流
         Long ok = redis.execute(tokenScript, List.of("rl:follow:" + fromUserId), "100", "1");
-        if (ok == 0L) {
+        if (!Long.valueOf(1L).equals(ok)) {
             return false;
         }
 
-        long id = idGenerator.nextId();
-        int inserted = mapper.insertFollowing(id, fromUserId, toUserId, 1);
-
-        if (inserted > 0) {
-            writeRelationOutbox("FollowCreated", fromUserId, toUserId, id);
-
+        int activated = mapper.activateFollowing(fromUserId, toUserId);
+        if (activated == 1) {
+            long relationId = requireRelationId(fromUserId, toUserId);
+            writeRelationOutbox("FollowCreated", fromUserId, toUserId, relationId);
             return true;
         }
-        return false;
+
+        long relationId = idGenerator.nextId();
+        int inserted = mapper.insertFollowingIfAbsent(relationId, fromUserId, toUserId);
+        if (inserted == 1) {
+            writeRelationOutbox("FollowCreated", fromUserId, toUserId, relationId);
+        }
+
+        // 已处于关注状态也视为命令成功，但不会重复产生事件。
+        return true;
     }
 
     /**
      * 取消关注操作，并写入 Outbox 事件。
      * @param fromUserId 发起取消关注的用户ID
      * @param toUserId 被取消关注的用户ID
-     * @return 是否取消成功
+     * @return 是否达到未关注状态；重复取消同样返回 true
      */
     @Override
     @Transactional
     public boolean unfollow(long fromUserId, long toUserId) {
+        validateRelationCommand(fromUserId, toUserId);
+
         int updated = mapper.cancelFollowing(fromUserId, toUserId);
-        if (updated > 0) {
-            writeRelationOutbox("FollowCanceled", fromUserId, toUserId, null);
-            return true;
+        if (updated == 1) {
+            long relationId = requireRelationId(fromUserId, toUserId);
+            writeRelationOutbox("FollowCanceled", fromUserId, toUserId, relationId);
         }
-        return false;
+
+        // 关系本来就不存在或已取消时，同样满足调用方期望的最终状态。
+        return true;
     }
 
     /**
@@ -127,6 +140,23 @@ public class RelationServiceImpl implements RelationService {
     @Override
     public boolean isFollowing(long fromUserId, long toUserId) {
         return mapper.existsFollowing(fromUserId, toUserId) > 0;
+    }
+
+    private void validateRelationCommand(long fromUserId, long toUserId) {
+        if (fromUserId == toUserId) {
+            throw new BusinessException(ErrorCodeEnums.RELATION_SELF_FOLLOW);
+        }
+        if (!userMapper.existsById(toUserId)) {
+            throw new BusinessException(ErrorCodeEnums.USER_NOT_FOUND);
+        }
+    }
+
+    private long requireRelationId(long fromUserId, long toUserId) {
+        Long relationId = mapper.findFollowingId(fromUserId, toUserId);
+        if (relationId == null) {
+            throw new IllegalStateException("关注状态已变化但关系记录不存在");
+        }
+        return relationId;
     }
 
     private void writeRelationOutbox(String eventType, long fromUserId, long toUserId, Long relationId) {

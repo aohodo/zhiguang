@@ -20,6 +20,8 @@ public interface UserMapper {
 
     UserEntity findById(@Param("id") Long id);
 
+    boolean existsById(@Param("id") Long id);
+
     void updatePassword(@Param("id") Long id, @Param("passwordHash") String passwordHash);
 
     void updateProfile(UserEntity user);
