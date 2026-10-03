@@ -9,6 +9,7 @@
 !.docker-data/.gitignore
 
 # Java / frontend build output
+.m2/
 **/target/
 **/node_modules/
 **/dist/

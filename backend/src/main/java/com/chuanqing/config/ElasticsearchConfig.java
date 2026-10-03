@@ -15,11 +15,11 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.util.StringUtils;
 
 @Configuration
-@EnableConfigurationProperties(EsProperties.class)
+@EnableConfigurationProperties(EsPropertiesConfig.class)
 @RequiredArgsConstructor
 public class ElasticsearchConfig {
 
-    private final EsProperties props;
+    private final EsPropertiesConfig props;
 
     @Bean
     public ElasticsearchClient elasticsearchClient() {

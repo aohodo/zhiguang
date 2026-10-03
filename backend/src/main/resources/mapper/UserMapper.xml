@@ -2,9 +2,9 @@
 <!DOCTYPE mapper
         PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
-<mapper namespace="com.chuanqing.user.mapper.UserMapper">
+<mapper namespace="com.chuanqing.mapper.UserMapper">
 
-    <resultMap id="UserResultMap" type="com.chuanqing.user.domain.User">
+    <resultMap id="UserResultMap" type="com.chuanqing.entity.UserEntity">
         <id column="id" property="id"/>
         <result column="phone" property="phone"/>
         <result column="email" property="email"/>
@@ -51,7 +51,7 @@
         )
     </select>
 
-    <insert id="insert" parameterType="com.chuanqing.user.domain.User"
+    <insert id="insert" parameterType="com.chuanqing.entity.UserEntity"
             useGeneratedKeys="true" keyProperty="id">
         INSERT INTO users (
             phone,
@@ -97,7 +97,7 @@
         WHERE id = #{id}
     </update>
 
-    <update id="updateProfile" parameterType="com.chuanqing.user.domain.User">
+    <update id="updateProfile" parameterType="com.chuanqing.entity.UserEntity">
         UPDATE users
         <set>
             <if test="nickname != null">nickname = #{nickname},</if>
