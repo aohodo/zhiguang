@@ -37,6 +37,15 @@
         SELECT * FROM know_posts WHERE id = #{id}
     </select>
 
+    <select id="listAccessByIds" resultMap="KnowPostResultMap">
+        SELECT id, creator_id, status, visible
+        FROM know_posts
+        WHERE id IN
+        <foreach collection="ids" item="id" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </select>
+
     <update id="updateContent" parameterType="com.chuanqing.entity.KnowPostEntity">
         UPDATE know_posts
         <set>
@@ -116,6 +125,7 @@
             u.avatar AS authorAvatar,
             u.nickname AS authorNickname,
             u.tags_json AS authorTagJson,
+            u.school AS authorSchool,
             p.publish_time AS publishTime,
             p.is_top AS isTop
         FROM know_posts p

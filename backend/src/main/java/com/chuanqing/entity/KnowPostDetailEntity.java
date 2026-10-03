@@ -21,6 +21,7 @@ public class KnowPostDetailEntity {
     private String authorAvatar;
     private String authorNickname;
     private String authorTagJson;
+    private String authorSchool;
     private Instant publishTime;
     private Boolean isTop;
     private String visible;

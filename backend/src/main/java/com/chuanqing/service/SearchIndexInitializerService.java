@@ -27,6 +27,8 @@ public class SearchIndexInitializerService {
         try {
             boolean exists = es.indices().exists(e -> e.index(INDEX)).value();
             if (exists) {
+                es.indices().putMapping(p -> p.index(INDEX)
+                        .properties("visible", Property.of(property -> property.keyword(KeywordProperty.of(b -> b)))));
                 return;
             }
 
@@ -46,6 +48,7 @@ public class SearchIndexInitializerService {
                     .properties("favorite_count", Property.of(p -> p.integer(IntegerNumberProperty.of(b -> b))))
                     .properties("view_count", Property.of(p -> p.integer(IntegerNumberProperty.of(b -> b))))
                     .properties("status", Property.of(p -> p.keyword(KeywordProperty.of(b -> b))))
+                    .properties("visible", Property.of(p -> p.keyword(KeywordProperty.of(b -> b))))
                     .properties("img_urls", Property.of(p -> p.keyword(KeywordProperty.of(b -> b))))
                     .properties("is_top", Property.of(p -> p.keyword(KeywordProperty.of(b -> b))))
                     .properties("title_suggest", Property.of(p -> p.completion(CompletionProperty.of(b -> b)))

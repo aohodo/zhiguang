@@ -20,6 +20,7 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.client.RestTemplate;
 import jakarta.annotation.PostConstruct;
+import org.springframework.context.annotation.DependsOn;
 
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
@@ -36,6 +37,7 @@ import com.chuanqing.entity.KnowPostFeedEntity;
  */
 @Service
 @RequiredArgsConstructor
+@DependsOn("searchIndexInitializerService")
 public class SearchIndexService {
     private static final Logger log = LoggerFactory.getLogger(SearchIndexService.class);
     private static final String INDEX = "zhiguang_content_index";
@@ -44,6 +46,7 @@ public class SearchIndexService {
     private final KnowPostMapper knowPostMapper;
     private final CounterService counterService;
     private final ObjectMapper objectMapper;
+    private final KnowPostPermissionService permissionService;
     private final RestTemplate http = new RestTemplate();
 
     /**
@@ -53,7 +56,9 @@ public class SearchIndexService {
     public void ensureBackfill() {
         try {
             long cnt = es.count(c -> c.index(INDEX)).count();
-            if (cnt > 0) return;
+            long legacyDocuments = es.count(c -> c.index(INDEX)
+                    .query(q -> q.bool(b -> b.mustNot(m -> m.exists(e -> e.field("visible")))))).count();
+            if (cnt > 0 && legacyDocuments == 0) return;
             int limit = 500;
             int offset = 0;
             while (true) {
@@ -83,6 +88,10 @@ public class SearchIndexService {
                 log.warn("Index upsert skipped: post {} not found", id);
                 return;
             }
+            if (!permissionService.isDiscoverable(row)) {
+                softDeleteKnowPost(id);
+                return;
+            }
             Map<String, Object> doc = new HashMap<>();
             doc.put("content_id", row.getId());
             doc.put("content_type", row.getType());
@@ -96,6 +105,7 @@ public class SearchIndexService {
                 doc.put("publish_time", row.getPublishTime().toEpochMilli());
             }
             doc.put("status", row.getStatus());
+            doc.put("visible", row.getVisible());
             doc.put("tags", parseStringArray(row.getTags()));
             doc.put("img_urls", parseStringArray(row.getImgUrls()));
             if (row.getIsTop() != null) {

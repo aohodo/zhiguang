@@ -6,6 +6,7 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import com.chuanqing.service.HotKeyDetectorService;
 import com.chuanqing.config.CachePropertiesConfig;
 import com.chuanqing.service.CounterService;
+import com.chuanqing.service.KnowPostPermissionService;
 import com.chuanqing.common.enums.ErrorCodeEnums;
 import com.chuanqing.entity.KnowPostEntity;
 import com.chuanqing.entity.KnowPostLifecycleEventEntity;
@@ -60,6 +61,8 @@ class KnowPostServiceImplTest {
     private OutboxMapper outboxMapper;
     @Mock
     private ApplicationEventPublisher eventPublisher;
+    @Mock
+    private KnowPostPermissionService permissionService;
 
     private Cache<String, FeedPageVO> feedPublicCache;
     private Cache<String, KnowPostDetailVO> knowPostDetailCache;
@@ -89,7 +92,8 @@ class KnowPostServiceImplTest {
                 knowPostDetailCache,
                 hotKeyDetector,
                 outboxMapper,
-                eventPublisher
+                eventPublisher,
+                permissionService
         );
 
     }

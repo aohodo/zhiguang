@@ -2,6 +2,7 @@ package com.chuanqing.service.impl;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.chuanqing.service.KnowPostService;
+import com.chuanqing.service.KnowPostPermissionService;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.chuanqing.exception.BusinessException;
@@ -60,6 +61,7 @@ public class KnowPostServiceImpl implements KnowPostService {
     private final ConcurrentHashMap<String, Object> singleFlight = new ConcurrentHashMap<>();
     private final OutboxMapper outboxMapper;
     private final ApplicationEventPublisher eventPublisher;
+    private final KnowPostPermissionService permissionService;
 
     // 手动编写构造器，Spring的@Qualifier直接标注在参数上（核心）
     public KnowPostServiceImpl(
@@ -73,7 +75,8 @@ public class KnowPostServiceImpl implements KnowPostService {
             @Qualifier("knowPostDetailCache") Cache<String, KnowPostDetailVO> knowPostDetailCache,
             HotKeyDetectorService hotKey,
             OutboxMapper outboxMapper,
-            ApplicationEventPublisher eventPublisher
+            ApplicationEventPublisher eventPublisher,
+            KnowPostPermissionService permissionService
     ) {
         this.mapper = mapper;
         this.idGen = idGen;
@@ -86,6 +89,7 @@ public class KnowPostServiceImpl implements KnowPostService {
         this.hotKey = hotKey;
         this.outboxMapper = outboxMapper;
         this.eventPublisher = eventPublisher;
+        this.permissionService = permissionService;
     }
     /**
      * 创建草稿并返回新 ID。
@@ -236,6 +240,8 @@ public class KnowPostServiceImpl implements KnowPostService {
             throw new BusinessException(ErrorCodeEnums.BAD_REQUEST, "草稿不存在或无权限");
         }
 
+        writeOutbox(id, "upsert", "KnowPostVisibilityChanged");
+
         invalidateCache(id);
     }
 
@@ -382,6 +388,8 @@ public class KnowPostServiceImpl implements KnowPostService {
      */
     @Transactional(readOnly = true)
     public KnowPostDetailVO getDetail(long id, Long currentUserIdNullable) {
+        KnowPostDetailEntity authorizedPost = permissionService.requireReadable(id, currentUserIdNullable);
+
         // 1. 构造缓存 Key：knowpost:detail:{id}:v{version}
         String pageKey = "knowpost:detail:" + id + ":v" + DETAIL_LAYOUT_VER;
         
@@ -423,7 +431,7 @@ public class KnowPostServiceImpl implements KnowPostService {
             }
 
             // 5. 数据库回源查询
-            KnowPostDetailEntity row = mapper.findDetailById(id);
+            KnowPostDetailEntity row = authorizedPost;
             
             // 6. 处理内容不存在或已删除的情况
             // 写入 "NULL" 空值缓存，防止缓存穿透（查询不存在的数据导致一直打数据库）
@@ -433,17 +441,7 @@ public class KnowPostServiceImpl implements KnowPostService {
                 throw new BusinessException(ErrorCodeEnums.BAD_REQUEST, "内容不存在");
             }
 
-            // 7. 权限校验
-            // 公开策略：状态为 published 且可见性为 public 的内容可直接访问
-            // 私有策略：否则仅作者本人可见
-            boolean isPublic = "published".equals(row.getStatus()) && "public".equals(row.getVisible());
-            boolean isOwner = currentUserIdNullable != null && row.getCreatorId() != null && currentUserIdNullable.equals(row.getCreatorId());
-            if (!isPublic && !isOwner) {
-                singleFlight.remove(pageKey);
-                throw new BusinessException(ErrorCodeEnums.BAD_REQUEST, "无权限查看");
-            }
-
-            // 8. 组装响应对象
+            // 7. 组装响应对象
             // 解析图片和标签 JSON
             List<String> images = parseStringArray(row.getImgUrls());
             List<String> tags = parseStringArray(row.getTags());

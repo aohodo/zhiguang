@@ -19,7 +19,7 @@ import java.util.*;
 
 /**
  * RAG 索引构建服务：
- * - 将公开且已发布的知文切片并写入向量库
+ * - 将已发布知文切片并写入向量库，查询前由统一权限服务鉴权
  * - 通过指纹（SHA256/ETag）判断是否需要重建，保证幂等
  * - 采用 delete-by-query 清理旧切片，再批量 upsert 新切片
  */
@@ -50,9 +50,9 @@ public class RagIndexService {
             return 0;
         }
 
-        // 仅索引公开的已发布知文
-        if (!"published".equalsIgnoreCase(row.getStatus()) || !"public".equalsIgnoreCase(row.getVisible())) {
-            log.warn("Post {} is not public/published, skip indexing", postId);
+        // 草稿和已删除内容不进入向量索引；可见性由查询入口统一鉴权
+        if (!"published".equalsIgnoreCase(row.getStatus())) {
+            log.warn("Post {} is not published, skip indexing", postId);
             return 0;
         }
 
@@ -94,6 +94,7 @@ public class RagIndexService {
             meta.put("contentSha256", currentSha);
             meta.put("contentUrl", row.getContentUrl());
             meta.put("title", row.getTitle());
+            meta.put("visibility", row.getVisible());
             docs.add(new Document(chunks.get(i), meta));
         }
         try {

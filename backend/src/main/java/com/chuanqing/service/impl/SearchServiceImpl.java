@@ -7,7 +7,6 @@ import co.elastic.clients.elasticsearch._types.SortOrder;
 import co.elastic.clients.elasticsearch._types.query_dsl.FieldValueFactorModifier;
 import co.elastic.clients.elasticsearch._types.query_dsl.FunctionBoostMode;
 import co.elastic.clients.elasticsearch.core.search.HighlightField;
-import co.elastic.clients.elasticsearch.core.search.Suggestion;
 import co.elastic.clients.util.NamedValue;
 import co.elastic.clients.elasticsearch.core.search.Hit;
 import com.chuanqing.vo.FeedItemVO;
@@ -15,6 +14,7 @@ import com.chuanqing.service.CounterService;
 import com.chuanqing.vo.SearchVO;
 import com.chuanqing.vo.SuggestVO;
 import com.chuanqing.service.SearchService;
+import com.chuanqing.service.KnowPostPermissionService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
@@ -23,6 +23,7 @@ import java.util.Base64;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
@@ -37,6 +38,7 @@ public class SearchServiceImpl implements SearchService {
 
     private final ElasticsearchClient es;
     private final CounterService counterService;
+    private final KnowPostPermissionService permissionService;
     /**
      * ES 索引名：zhiguang 内容统一索引。
      */
@@ -71,6 +73,8 @@ public class SearchServiceImpl implements SearchService {
                                             .fields("title^3", "body")));
                                     bq.filter(f -> f.term(t -> t.field("status")
                                             .value(v -> v.stringValue("published"))));
+                                    bq.filter(f -> f.term(t -> t.field("visible")
+                                            .value(v -> v.stringValue("public"))));
 
                                     if (tags != null && !tags.isEmpty()) {
                                         bq.filter(f -> f.terms(t -> t.field("tags")
@@ -106,6 +110,12 @@ public class SearchServiceImpl implements SearchService {
 
         List<FeedItemVO> items = new ArrayList<>();
         List<Hit<Map<String, Object>>> hits = resp.hits() == null ? Collections.emptyList() : resp.hits().hits();
+        Set<Long> discoverableIds = permissionService.retainDiscoverableIds(hits.stream()
+                .map(Hit::source)
+                .filter(java.util.Objects::nonNull)
+                .map(source -> asLong(source.get("content_id")))
+                .filter(java.util.Objects::nonNull)
+                .toList());
 
         for (Hit<Map<String, Object>> hit : hits) {
             Map<String, Object> source = hit.source();
@@ -113,6 +123,10 @@ public class SearchServiceImpl implements SearchService {
                 continue;
             }
             String id = asString(source.get("content_id"));
+            Long numericId = asLong(source.get("content_id"));
+            if (numericId == null || !discoverableIds.contains(numericId)) {
+                continue;
+            }
             String title = asString(source.get("title"));
             String descriptionFromDoc = asString(source.get("description"));
             String snippet = buildSnippet(hit);
@@ -159,34 +173,49 @@ public class SearchServiceImpl implements SearchService {
     }
 
     /**
-     * 联想建议：Completion Suggester，取 title_suggest 的候选文本。
+     * 联想建议：只从公开且已发布的文档标题中匹配，避免非公开标题泄漏。
      */
     @SuppressWarnings("unchecked")
     public SuggestVO suggest(String prefix, int size) {
         co.elastic.clients.elasticsearch.core.SearchResponse<Map<String, Object>> resp;
         try {
             resp = es.search(s -> s.index(INDEX)
-                    .suggest(sug -> sug.suggesters("title_suggest",
-                            sc -> sc.prefix(prefix).completion(c -> c.field("title_suggest").size(size))))
+                            .size(size)
+                            .source(source -> source.filter(filter -> filter.includes("title")))
+                            .query(q -> q.bool(b -> b
+                                    .must(m -> m.matchPhrasePrefix(match -> match.field("title").query(prefix)))
+                                    .filter(f -> f.term(t -> t.field("status").value("published")))
+                                    .filter(f -> f.term(t -> t.field("visible").value("public")))))
                     , (Class<Map<String, Object>>)(Class<?>) Map.class);
         } catch (Exception e) {
             return new SuggestVO(Collections.emptyList());
         }
         List<String> items = new ArrayList<>();
         try {
-            var sugg = resp.suggest();
-            List<Suggestion<Map<String, Object>>> entry = sugg == null ? null : sugg.get("title_suggest");
-            if (entry != null) {
-                for (var s : entry) {
-                    var comp = s.completion();
-                    if (comp != null && comp.options() != null) {
-                        for (var opt : comp.options()) {
-                            String text = opt.text();
-                            if (text != null && !text.isBlank()) {
-                                items.add(text);
-                            }
+            Set<Long> discoverableIds = permissionService.retainDiscoverableIds(resp.hits().hits().stream()
+                    .map(hit -> {
+                        try {
+                            return Long.parseLong(hit.id());
+                        } catch (Exception exception) {
+                            return null;
                         }
-                    }
+                    })
+                    .filter(java.util.Objects::nonNull)
+                    .toList());
+            for (Hit<Map<String, Object>> hit : resp.hits().hits()) {
+                Long postId;
+                try {
+                    postId = Long.parseLong(hit.id());
+                } catch (Exception exception) {
+                    continue;
+                }
+                if (!discoverableIds.contains(postId)) {
+                    continue;
+                }
+                Map<String, Object> source = hit.source();
+                String title = source == null ? null : asString(source.get("title"));
+                if (title != null && !title.isBlank() && !items.contains(title)) {
+                    items.add(title);
                 }
             }
         } catch (Exception ignored) {}

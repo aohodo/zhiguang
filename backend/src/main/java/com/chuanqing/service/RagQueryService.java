@@ -26,11 +26,14 @@ public class RagQueryService {
     private final ChatClient chatClient;
     // 索引服务：确保帖子在问答前已建立/更新索引
     private final RagIndexService indexService;
+    private final KnowPostPermissionService permissionService;
 
     /**
      * 使用 WebFlux 返回回答内容的流。
      */
-    public Flux<String> streamAnswerFlux(long postId, String question, int topK, int maxTokens) {
+    public Flux<String> streamAnswerFlux(long postId, Long viewerId, String question, int topK, int maxTokens) {
+        permissionService.requireReadable(postId, viewerId);
+
         // 轻量保障：如索引不存在或指纹未变更则跳过，否则重建
         indexService.ensureIndexed(postId);
 

@@ -15,6 +15,8 @@ public interface KnowPostMapper {
 
     KnowPostEntity findById(@Param("id") Long id);
 
+    List<KnowPostEntity> listAccessByIds(@Param("ids") List<Long> ids);
+
     int updateContent(KnowPostEntity post);
 
     int updateMetadata(KnowPostEntity post);
