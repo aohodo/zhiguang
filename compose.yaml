@@ -110,7 +110,7 @@ services:
       SPRING_KAFKA_LISTENER_ACK_MODE: manual_immediate
       SPRING_ELASTICSEARCH_URIS: http://elasticsearch:9200
       SPRING_AI_VECTORSTORE_ELASTICSEARCH_INDEX_NAME: zhiguang-ai-index
-      SPRING_AI_VECTORSTORE_ELASTICSEARCH_INITIALIZE_SCHEMA: "false"
+      SPRING_AI_VECTORSTORE_ELASTICSEARCH_INITIALIZE_SCHEMA: "true"
       AUTH_JWT_PRIVATE_KEY: classpath:keys/private.pem
       AUTH_JWT_PUBLIC_KEY: classpath:keys/public.pem
       MYBATIS_MAPPER_LOCATIONS: classpath*:mapper/*.xml
