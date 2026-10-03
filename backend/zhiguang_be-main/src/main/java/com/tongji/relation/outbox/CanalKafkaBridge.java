@@ -86,7 +86,7 @@ public class CanalKafkaBridge implements SmartLifecycle {
      */
     @Override
     public void start() {
-        if (running) {
+        if (running || !enabled) {
             log.info("Canal bridge start skipped: running={} enabled={} host={} port={} dest={} filter={}", running, enabled, host, port, destination, filter);
             return;
         }

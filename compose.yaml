@@ -9,8 +9,13 @@ services:
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
+      - --server-id=1
+      - --log-bin=mysql-bin
+      - --binlog-format=ROW
+      - --binlog-row-image=FULL
     volumes:
       - ./.docker-data/mysql:/var/lib/mysql
+      - ./backend/zhiguang_be-main/db/canal-user.sql:/docker-entrypoint-initdb.d/00-canal-user.sql:ro
       - ./backend/zhiguang_be-main/db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
@@ -64,6 +69,27 @@ services:
       timeout: 5s
       retries: 30
 
+  canal:
+    image: canal/canal-server:v1.1.8
+    environment:
+      canal.auto.scan: "false"
+      canal.destinations: example
+      canal.instance.master.address: mysql:3306
+      canal.instance.dbUsername: canal
+      canal.instance.dbPassword: Canal@123456
+      canal.instance.connectionCharset: UTF-8
+      canal.instance.tsdb.enable: "true"
+      canal.instance.gtidon: "false"
+      canal.instance.filter.regex: zhiguang\\.outbox
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/11111'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
   backend:
     build:
       context: ./backend/zhiguang_be-main
@@ -88,7 +114,7 @@ services:
       AUTH_JWT_PRIVATE_KEY: classpath:keys/private.pem
       AUTH_JWT_PUBLIC_KEY: classpath:keys/public.pem
       MYBATIS_MAPPER_LOCATIONS: classpath*:mapper/*.xml
-      CANAL_ENABLED: "false"
+      CANAL_ENABLED: "true"
       CANAL_HOST: canal
       CANAL_PORT: 11111
       CANAL_DESTINATION: example
@@ -110,6 +136,8 @@ services:
       kafka:
         condition: service_healthy
       elasticsearch:
+        condition: service_healthy
+      canal:
         condition: service_healthy
     ports:
       - "8080:8080"
