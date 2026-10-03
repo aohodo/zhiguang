@@ -122,6 +122,16 @@
             <version>9.5.0</version>
         </dependency>
 
+        <!-- Flyway：自动应用可追踪的数据库增量脚本 -->
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-mysql</artifactId>
+        </dependency>
+
         <!-- Spring Security：认证/鉴权框架基础 -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

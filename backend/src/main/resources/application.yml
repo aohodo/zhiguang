@@ -13,6 +13,11 @@ spring:
       max-lifetime: 1700000
       keepalive-time: 300000
       connection-timeout: 30000
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+    baseline-version: 0
   jackson:
     serialization:
       write-dates-as-timestamps: false
@@ -22,8 +27,6 @@ spring:
       port: ${SPRING_DATA_REDIS_PORT:6379}
   kafka:
     bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
-    template:
-      default-topic: counter-events
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.apache.kafka.common.serialization.StringSerializer

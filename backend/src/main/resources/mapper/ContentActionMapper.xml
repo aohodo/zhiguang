@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.chuanqing.mapper.ContentActionMapper">
+    <resultMap id="ContentActionResultMap" type="com.chuanqing.entity.ContentActionEntity">
+        <id property="id" column="id"/>
+        <result property="userId" column="user_id"/>
+        <result property="entityType" column="entity_type"/>
+        <result property="entityId" column="entity_id"/>
+        <result property="actionType" column="action_type"/>
+        <result property="actionStatus" column="action_status"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <update id="activateExisting">
+        UPDATE content_actions
+        SET action_status=1, updated_at=NOW(3)
+        WHERE user_id=#{userId} AND entity_type=#{entityType} AND entity_id=#{entityId}
+          AND action_type=#{actionType} AND action_status=0
+    </update>
+
+    <insert id="insertIfAbsent">
+        INSERT IGNORE INTO content_actions
+            (id, user_id, entity_type, entity_id, action_type, action_status, created_at, updated_at)
+        VALUES
+            (#{id}, #{userId}, #{entityType}, #{entityId}, #{actionType}, 1, NOW(3), NOW(3))
+    </insert>
+
+    <update id="deactivate">
+        UPDATE content_actions
+        SET action_status=0, updated_at=NOW(3)
+        WHERE user_id=#{userId} AND entity_type=#{entityType} AND entity_id=#{entityId}
+          AND action_type=#{actionType} AND action_status=1
+    </update>
+
+    <select id="findByKey" resultMap="ContentActionResultMap">
+        SELECT * FROM content_actions
+        WHERE user_id=#{userId} AND entity_type=#{entityType} AND entity_id=#{entityId}
+          AND action_type=#{actionType}
+    </select>
+
+    <select id="existsActive" resultType="int">
+        SELECT EXISTS(
+            SELECT 1 FROM content_actions
+            WHERE user_id=#{userId} AND entity_type=#{entityType} AND entity_id=#{entityId}
+              AND action_type=#{actionType} AND action_status=1
+        )
+    </select>
+
+    <select id="countActive" resultType="long">
+        SELECT COUNT(*) FROM content_actions
+        WHERE entity_type=#{entityType} AND entity_id=#{entityId}
+          AND action_type=#{actionType} AND action_status=1
+    </select>
+
+    <select id="listActiveByUser" resultMap="ContentActionResultMap">
+        SELECT * FROM content_actions
+        WHERE user_id=#{userId} AND action_type=#{actionType} AND action_status=1
+        ORDER BY updated_at DESC, id DESC
+        LIMIT #{limit} OFFSET #{offset}
+    </select>
+</mapper>

@@ -1,23 +1,33 @@
 package com.chuanqing.service.impl;
 
+import com.chuanqing.common.enums.ActionEntityTypeEnums;
+import com.chuanqing.common.enums.ActionTypeEnums;
+import com.chuanqing.entity.BitmapShardEntity;
+import com.chuanqing.entity.ContentActionEntity;
+import com.chuanqing.exception.BusinessException;
+import com.chuanqing.common.enums.ErrorCodeEnums;
+import com.chuanqing.mapper.ContentActionMapper;
+import com.chuanqing.mapper.OutboxMapper;
+import com.chuanqing.service.CounterService;
+import com.chuanqing.service.KnowPostPermissionService;
 import com.chuanqing.utils.CounterKeyUtils;
 import com.chuanqing.utils.CounterSchemaUtils;
-import com.chuanqing.entity.BitmapShardEntity;
-import com.chuanqing.service.CounterService;
-import com.chuanqing.entity.CounterEventEntity;
-import com.chuanqing.service.CounterEventProducerService;
+import com.chuanqing.utils.SnowflakeIdGeneratorUtils;
+import com.chuanqing.vo.ActionItemVO;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
-import org.springframework.context.ApplicationEventPublisher;
 import org.redisson.api.RedissonClient;
 import org.redisson.api.RLock;
 import org.redisson.api.RRateLimiter;
 import org.redisson.api.RateType;
 import org.redisson.api.RBucket;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -25,11 +35,11 @@ import java.util.*;
 import java.util.concurrent.TimeUnit;
 
 /**
- * 内容实体计数服务实现（位图事实 + 事件聚合 + SDS 汇总）。
+ * 内容行为与计数服务实现（MySQL 事实 + Redis 位图/SDS 投影）。
  *
  * <p>职责：</p>
- * - 位图原子切换并产出计数事件（幂等）；
- * - 读取汇总计数（SDS），异常时基于位图分片重建；
+ * - MySQL 行为事实与 Outbox 同事务写入；
+ * - 读取汇总计数（SDS），异常时基于 MySQL 行为事实重建；
  * - 批量读取优化与“是否点赞/收藏”判定。
  */
 @Slf4j
@@ -37,10 +47,13 @@ import java.util.concurrent.TimeUnit;
 public class CounterServiceImpl implements CounterService {
 
     private final StringRedisTemplate redis;
-    private final DefaultRedisScript<Long> toggleScript;
-    private final CounterEventProducerService eventProducer;
-    private final ApplicationEventPublisher eventPublisher;
+    private final DefaultRedisScript<Long> setCounterScript;
     private final RedissonClient redisson;
+    private final ContentActionMapper actionMapper;
+    private final KnowPostPermissionService permissionService;
+    private final OutboxMapper outboxMapper;
+    private final SnowflakeIdGeneratorUtils idGenerator;
+    private final ObjectMapper objectMapper;
     @Value("${counter.rebuild.lock.ttl-ms:5000}")
     private long lockTtlMs;
     @Value("${counter.rebuild.rate.permits:3}")
@@ -52,87 +65,159 @@ public class CounterServiceImpl implements CounterService {
     @Value("${counter.rebuild.backoff.max-ms:30000}")
     private long backoffMaxMs;
 
-    public CounterServiceImpl(StringRedisTemplate redis, CounterEventProducerService eventProducer, ApplicationEventPublisher eventPublisher, RedissonClient redisson) {
+    public CounterServiceImpl(StringRedisTemplate redis,
+                              RedissonClient redisson,
+                              ContentActionMapper actionMapper,
+                              KnowPostPermissionService permissionService,
+                              OutboxMapper outboxMapper,
+                              SnowflakeIdGeneratorUtils idGenerator,
+                              ObjectMapper objectMapper) {
         this.redis = redis;
-        this.eventProducer = eventProducer;
-        this.eventPublisher = eventPublisher;
         this.redisson = redisson;
-        this.toggleScript = new DefaultRedisScript<>();
-        this.toggleScript.setResultType(Long.class);
-        // 位图状态原子切换，仅在状态变化时返回 1
-        this.toggleScript.setScriptText(TOGGLE_LUA);
+        this.actionMapper = actionMapper;
+        this.permissionService = permissionService;
+        this.outboxMapper = outboxMapper;
+        this.idGenerator = idGenerator;
+        this.objectMapper = objectMapper;
+        this.setCounterScript = new DefaultRedisScript<>();
+        this.setCounterScript.setResultType(Long.class);
+        this.setCounterScript.setScriptText(SET_COUNTER_FIELD_LUA);
     }
 
     /**
-     * 点赞：位图原子置位，仅当状态从未点赞→已点赞时返回 true。
-     * 同步路径完成事实层更新后产出增量事件，异步聚合到计数快照。
+     * 点赞：仅当数据库事实从未点赞变为已点赞时返回 true 并写 Outbox。
      * @param entityType 实体类型
      * @param entityId 实体 ID
      * @param userId 用户 ID
      * @return 是否发生状态变化（幂等）
      */
     @Override
+    @Transactional
     public boolean like(String entityType, String entityId, long userId) {
-        return toggle(entityType, entityId, userId, "like", CounterSchemaUtils.IDX_LIKE, true);
+        return changeAction(entityType, entityId, userId, ActionTypeEnums.LIKE, true);
     }
 
     /**
-     * 取消点赞：位图原子清零，仅当状态从已点赞→未点赞时返回 true。
-     * 产出增量事件（delta=-1），异步聚合到计数快照。
+     * 取消点赞：仅当数据库事实从已点赞变为未点赞时返回 true。
      */
     @Override
+    @Transactional
     public boolean unlike(String entityType, String entityId, long userId) {
-        return toggle(entityType, entityId, userId, "like", CounterSchemaUtils.IDX_LIKE, false);
+        return changeAction(entityType, entityId, userId, ActionTypeEnums.LIKE, false);
     }
 
     /**
-     * 收藏：位图原子置位，并产出增量事件（delta=+1）。
+     * 收藏：仅在数据库事实发生状态变化时写 Outbox。
      */
     @Override
+    @Transactional
     public boolean fav(String entityType, String entityId, long userId) {
-        return toggle(entityType, entityId, userId, "fav", CounterSchemaUtils.IDX_FAV, true);
+        return changeAction(entityType, entityId, userId, ActionTypeEnums.FAVORITE, true);
     }
 
     /**
-     * 取消收藏：位图原子清零，并产出增量事件（delta=-1）。
+     * 取消收藏：重复调用保持幂等。
      */
     @Override
+    @Transactional
     public boolean unfav(String entityType, String entityId, long userId) {
-        return toggle(entityType, entityId, userId, "fav", CounterSchemaUtils.IDX_FAV, false);
+        return changeAction(entityType, entityId, userId, ActionTypeEnums.FAVORITE, false);
     }
 
-    /**
-     * 位图状态切换：仅在状态变化时返回成功，并产出增量事件。
-     * @param etype 实体类型
-     * @param eid 实体 ID
-     * @param uid 用户 ID
-     * @param metric 指标名称（like/fav）
-     * @param idx 指标索引（用于 SDS 固定结构定位）
-     * @param add 是否置位（true=添加，false=移除）
-     */
-    private boolean toggle(String etype, String eid, long uid, String metric, int idx, boolean add) {
-        // 固定分片定位：按用户ID映射到 chunk 与分片内 bit 偏移，避免单键膨胀与热点
-        long chunk = BitmapShardEntity.chunkOf(uid);
-        // 分片内位偏移
-        long bit = BitmapShardEntity.bitOf(uid);
-        String bmKey = CounterKeyUtils.bitmapKey(metric, etype, eid, chunk);
-        List<String> keys = List.of(bmKey);
-        List<String> args = List.of(String.valueOf(bit), add ? "add" : "remove");
-        Long changed = redis.execute(toggleScript, keys, args.toArray());
-        boolean ok = changed == 1L;
-        if (ok) {
-            int delta = add ? 1 : -1;
-            // 产出计数事件（异步聚合），分区按实体维度保证同实体事件顺序
-            eventProducer.publish(CounterEventEntity.of(etype, eid, metric, idx, uid, delta));
-            // 本地事件：触发缓存失效/旁路更新等快速路径
-            eventPublisher.publishEvent(CounterEventEntity.of(etype, eid, metric, idx, uid, delta));
+    /** 数据库状态切换与 Outbox 写入。 */
+    private boolean changeAction(String entityType,
+                                 String entityId,
+                                 long userId,
+                                 ActionTypeEnums actionType,
+                                 boolean active) {
+        ActionEntityTypeEnums targetType = requireSupportedEntityType(entityType);
+        long targetId = requireEntityId(entityId);
+        permissionService.requireReadable(targetId, userId);
+
+        int changed = active
+                ? actionMapper.activateExisting(userId, targetType.getValue(), targetId, actionType.getValue())
+                : actionMapper.deactivate(userId, targetType.getValue(), targetId, actionType.getValue());
+
+        Long actionId = null;
+        if (active && changed == 0) {
+            long candidateId = idGenerator.nextId();
+            changed = actionMapper.insertIfAbsent(
+                    candidateId, userId, targetType.getValue(), targetId, actionType.getValue());
+            if (changed == 1) {
+                actionId = candidateId;
+            }
         }
-        return ok;
+
+        if (changed == 0) {
+            return false;
+        }
+        if (actionId == null) {
+            ContentActionEntity action = actionMapper.findByKey(
+                    userId, targetType.getValue(), targetId, actionType.getValue());
+            if (action == null || action.getId() == null) {
+                throw new IllegalStateException("行为状态已变化但记录不存在");
+            }
+            actionId = action.getId();
+        }
+
+        writeActionOutbox(actionId, userId, targetType, targetId, actionType, active);
+        return true;
+    }
+
+    private ActionEntityTypeEnums requireSupportedEntityType(String entityType) {
+        try {
+            return ActionEntityTypeEnums.fromValue(entityType);
+        } catch (IllegalArgumentException exception) {
+            throw new BusinessException(ErrorCodeEnums.BAD_REQUEST, exception.getMessage());
+        }
+    }
+
+    private long requireEntityId(String entityId) {
+        try {
+            long value = Long.parseLong(entityId);
+            if (value <= 0) {
+                throw new NumberFormatException("non-positive");
+            }
+            return value;
+        } catch (NumberFormatException exception) {
+            throw new BusinessException(ErrorCodeEnums.BAD_REQUEST, "实体 ID 非法");
+        }
+    }
+
+    private void writeActionOutbox(Long actionId,
+                                   long userId,
+                                   ActionEntityTypeEnums entityType,
+                                   long entityId,
+                                   ActionTypeEnums actionType,
+                                   boolean active) {
+        long eventId = idGenerator.nextId();
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("eventId", eventId);
+        payload.put("eventType", active ? "ContentActionActivated" : "ContentActionDeactivated");
+        payload.put("eventVersion", 1);
+        payload.put("occurredAt", java.time.Instant.now().toString());
+        payload.put("entity", "content_action");
+        payload.put("actionId", actionId);
+        payload.put("userId", userId);
+        payload.put("entityType", entityType.getValue());
+        payload.put("entityId", entityId);
+        payload.put("actionType", actionType.getValue());
+
+        try {
+            String json = objectMapper.writeValueAsString(payload);
+            int inserted = outboxMapper.insert(eventId, "content_action", actionId,
+                    active ? "ContentActionActivated" : "ContentActionDeactivated", json);
+            if (inserted != 1) {
+                throw new IllegalStateException("行为事件写入失败");
+            }
+        } catch (JsonProcessingException exception) {
+            throw new IllegalStateException("行为事件序列化失败", exception);
+        }
     }
 
     /**
      * 获取实体计数汇总（SDS）。
-     * 若缺失或结构异常则触发基于位图的事实重建，并清理对应聚合字段。
+     * 若缺失或结构异常则触发基于 MySQL 行为事实的重建。
      */
     @Override
     public Map<String, Long> getCounts(String entityType, String entityId, List<String> metrics) {
@@ -177,15 +262,16 @@ public class CounterServiceImpl implements CounterService {
                     }
                     return result;
                 }
-                // 依据位图分片统计真实计数（仅由持锁者执行重建）
+                // 依据 MySQL 行为事实重建，Redis 全量丢失后仍可恢复。
                 byte[] newSds = new byte[expectedLen];
                 List<String> rebuildFields = new ArrayList<>();
+                long targetId = requireEntityId(entityId);
                 for (String m : metrics) {
                     Integer idx = CounterSchemaUtils.NAME_TO_IDX.get(m);
                     if (idx == null) {
                         continue;
                     }
-                    long sum = bitCountShardsPipelined(m, entityType, entityId);
+                    long sum = actionMapper.countActive(entityType, targetId, m);
                     writeInt32BE(newSds, idx * CounterSchemaUtils.FIELD_SIZE, sum);
                     result.put(m, sum);
                     rebuildFields.add(String.valueOf(idx));
@@ -300,6 +386,36 @@ public class CounterServiceImpl implements CounterService {
         return getBit(CounterKeyUtils.bitmapKey("fav", entityType, entityId, chunk), bit);
     }
 
+    @Override
+    public void synchronizeCount(String entityType, String entityId, String metric, long count) {
+        Integer index = CounterSchemaUtils.NAME_TO_IDX.get(metric);
+        if (index == null) {
+            throw new IllegalArgumentException("不支持的计数指标: " + metric);
+        }
+        redis.execute(
+                setCounterScript,
+                List.of(CounterKeyUtils.sdsKey(entityType, entityId)),
+                String.valueOf(CounterSchemaUtils.SCHEMA_LEN),
+                String.valueOf(CounterSchemaUtils.FIELD_SIZE),
+                String.valueOf(index),
+                String.valueOf(Math.max(0L, count))
+        );
+    }
+
+    @Override
+    public List<ActionItemVO> listMyActions(long userId, String actionType, int limit, int offset) {
+        ActionTypeEnums type;
+        try {
+            type = ActionTypeEnums.fromValue(actionType);
+        } catch (IllegalArgumentException exception) {
+            throw new BusinessException(ErrorCodeEnums.BAD_REQUEST, exception.getMessage());
+        }
+        return actionMapper.listActiveByUser(userId, type.getValue(), limit, offset).stream()
+                .map(action -> new ActionItemVO(
+                        action.getEntityType(), action.getEntityId(), action.getUpdatedAt()))
+                .toList();
+    }
+
     /**
      * 读取位图某偏移位（GETBIT）。
      * @param key 位图分片键
@@ -412,48 +528,27 @@ public class CounterServiceImpl implements CounterService {
         buf[off + 3] = (byte) (n & 0xFF);
     }
 
-    /**
-     * 基于位图分片进行管道化 BITCOUNT 汇总，用于按事实重建计数。
-     * 说明：当前使用 KEYS 枚举分片（生产建议维护索引集合），结果按分片 BITCOUNT 求和。
-     */
-    private long bitCountShardsPipelined(String metric, String etype, String eid) {
-        String pattern = String.format("bm:%s:%s:%s:*", metric, etype, eid);
-        // 生产环境建议以索引集合替代 KEYS
-        Set<String> keys = redis.keys(pattern); 
-        if (keys.isEmpty()) return 0L;
-
-        // 管道批量 BITCOUNT 汇总
-        List<Object> res = redis.executePipelined((RedisCallback<Object>) connection -> {
-            for (String k : keys) {
-                connection.stringCommands().bitCount(k.getBytes(StandardCharsets.UTF_8));
-            }
-            return null;
-        });
-        long sum = 0L;
-
-        for (Object o : res) {
-            if (o instanceof Number n) {
-                sum += n.longValue();
-            }
-        }
-        return sum;
-    }
-
-    // Redis 内嵌 Lua（Redis 5/6 的 Lua 5.1），位图原子切换（分片内偏移）
-    private static final String TOGGLE_LUA = """
-            local bmKey = KEYS[1]
-            local offset = tonumber(ARGV[1])
-            local op = ARGV[2] -- 'add' or 'remove'
-            local prev = redis.call('GETBIT', bmKey, offset)
-            if op == 'add' then
-              if prev == 1 then return 0 end
-              redis.call('SETBIT', bmKey, offset, 1)
-              return 1
-            elseif op == 'remove' then
-              if prev == 0 then return 0 end
-              redis.call('SETBIT', bmKey, offset, 0)
-              return 1
+    private static final String SET_COUNTER_FIELD_LUA = """
+            local key = KEYS[1]
+            local schemaLen = tonumber(ARGV[1])
+            local fieldSize = tonumber(ARGV[2])
+            local idx = tonumber(ARGV[3])
+            local value = tonumber(ARGV[4])
+            local function write32be(n)
+              if n < 0 then n = 0 end
+              if n > 4294967295 then n = 4294967295 end
+              local t = {}
+              for i=4,1,-1 do t[i] = n % 256; n = math.floor(n/256) end
+              return string.char(unpack(t))
             end
-            return -1
+            local current = redis.call('GET', key)
+            if not current or string.len(current) ~= schemaLen * fieldSize then
+              current = string.rep(string.char(0), schemaLen * fieldSize)
+            end
+            local off = idx * fieldSize
+            local segment = write32be(value)
+            current = string.sub(current, 1, off) .. segment .. string.sub(current, off + fieldSize + 1)
+            redis.call('SET', key, current)
+            return 1
             """;
 }

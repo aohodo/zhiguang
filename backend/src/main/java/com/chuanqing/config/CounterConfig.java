@@ -11,11 +11,11 @@ import org.springframework.kafka.core.ProducerFactory;
 import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
- * 计数模块配置：启用调度与 Kafka，并提供字符串模板。
+ * Kafka 与定时任务基础配置。
  */
 @Configuration
-@EnableScheduling // 启用 @Scheduled 定时任务（计数聚合刷写）
-@EnableKafka // 启用 Kafka（计数事件生产与消费）
+@EnableScheduling
+@EnableKafka
 public class CounterConfig {
 
     @Bean

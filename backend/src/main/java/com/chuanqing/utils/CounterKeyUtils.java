@@ -15,6 +15,14 @@ public final class CounterKeyUtils {
         return String.format("bm:%s:%s:%s:%d", metric, entityType, entityId, chunk); // 位图事实层（分片）
     }
 
+    public static String bitmapIndexKey(String metric, String entityType, String entityId) {
+        return String.format("bm:index:%s:%s:%s", metric, entityType, entityId);
+    }
+
+    public static String userActionKey(String metric, long userId) {
+        return String.format("ua:%s:%d", metric, userId);
+    }
+
     // 聚合增量持久化桶（Hash）：agg:{schema}:{etype}:{eid}
     public static String aggKey(String entityType, String entityId) {
         return String.format("agg:%s:%s:%s", CounterSchemaUtils.SCHEMA_ID, entityType, entityId); // 刷写前的增量存储桶

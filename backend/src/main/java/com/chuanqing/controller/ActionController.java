@@ -10,6 +10,8 @@ import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.Map;
+import java.util.List;
+import com.chuanqing.vo.ActionItemVO;
 
 /**
  * 行为接口：点赞/取消点赞、收藏/取消收藏。
@@ -38,7 +40,7 @@ public class ActionController {
         boolean changed = counterService.like(req.getEntityType(), req.getEntityId(), uid);
         return ResponseEntity.ok(Map.of(
                 "changed", changed, // 标识这次操作是否改变状态（避免重复点击）
-                "liked", counterService.isLiked(req.getEntityType(), req.getEntityId(), uid)
+                "liked", true
         ));
     }
 
@@ -52,7 +54,7 @@ public class ActionController {
         boolean changed = counterService.unlike(req.getEntityType(), req.getEntityId(), uid);
         return ResponseEntity.ok(Map.of(
                 "changed", changed, // 状态是否发生变化
-                "liked", counterService.isLiked(req.getEntityType(), req.getEntityId(), uid)
+                "liked", false
         ));
     }
 
@@ -66,7 +68,7 @@ public class ActionController {
         boolean changed = counterService.fav(req.getEntityType(), req.getEntityId(), uid);
         return ResponseEntity.ok(Map.of(
                 "changed", changed, // 状态是否发生变化
-                "faved", counterService.isFaved(req.getEntityType(), req.getEntityId(), uid)
+                "faved", true
         ));
     }
 
@@ -80,7 +82,27 @@ public class ActionController {
         boolean changed = counterService.unfav(req.getEntityType(), req.getEntityId(), uid);
         return ResponseEntity.ok(Map.of(
                 "changed", changed, // 状态是否发生变化
-                "faved", counterService.isFaved(req.getEntityType(), req.getEntityId(), uid)
+                "faved", false
         ));
+    }
+
+    @GetMapping("/likes")
+    public List<ActionItemVO> myLikes(@AuthenticationPrincipal Jwt jwt,
+                                      @RequestParam(value = "limit", defaultValue = "20") int limit,
+                                      @RequestParam(value = "offset", defaultValue = "0") int offset) {
+        long uid = jwtService.extractUserId(jwt);
+        return counterService.listMyActions(uid, "like", clampLimit(limit), Math.max(offset, 0));
+    }
+
+    @GetMapping("/favorites")
+    public List<ActionItemVO> myFavorites(@AuthenticationPrincipal Jwt jwt,
+                                          @RequestParam(value = "limit", defaultValue = "20") int limit,
+                                          @RequestParam(value = "offset", defaultValue = "0") int offset) {
+        long uid = jwtService.extractUserId(jwt);
+        return counterService.listMyActions(uid, "fav", clampLimit(limit), Math.max(offset, 0));
+    }
+
+    private int clampLimit(int limit) {
+        return Math.min(Math.max(limit, 1), 100);
     }
 }
