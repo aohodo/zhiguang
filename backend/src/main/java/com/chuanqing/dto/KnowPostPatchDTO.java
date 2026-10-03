@@ -16,12 +16,14 @@ import java.util.List;
 @AllArgsConstructor
 public class KnowPostPatchDTO {
 
+    @Size(max = 256, message = "标题不能超过 256 个字符")
     private String title;
     private Long tagId;
     private @Size(max = 20) List<String> tags;
     private @Size(max = 20) List<String> imgUrls;
     private String visible;
     private Boolean isTop;
+    @Size(max = 50, message = "摘要不能超过 50 个字符")
     private String description;
 
     public String title() {

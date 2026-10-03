@@ -1,6 +1,7 @@
 package com.chuanqing.common.enums;
 
 import lombok.Getter;
+import org.springframework.http.HttpStatus;
 
 @Getter
 public enum ErrorCodeEnums {
@@ -16,15 +17,25 @@ public enum ErrorCodeEnums {
     PASSWORD_POLICY_VIOLATION("PASSWORD_POLICY_VIOLATION", "密码强度不足"),
     TERMS_NOT_ACCEPTED("TERMS_NOT_ACCEPTED", "请先同意服务条款"),
     REFRESH_TOKEN_INVALID("REFRESH_TOKEN_INVALID", "刷新令牌无效"),
+    KNOW_POST_NOT_FOUND("KNOW_POST_NOT_FOUND", "知文不存在", HttpStatus.NOT_FOUND),
+    KNOW_POST_FORBIDDEN("KNOW_POST_FORBIDDEN", "无权操作该知文", HttpStatus.FORBIDDEN),
+    KNOW_POST_STATE_CONFLICT("KNOW_POST_STATE_CONFLICT", "知文状态冲突", HttpStatus.CONFLICT),
+    KNOW_POST_INCOMPLETE("KNOW_POST_INCOMPLETE", "知文内容不完整"),
     BAD_REQUEST("BAD_REQUEST", "请求参数错误"),
     INTERNAL_ERROR("INTERNAL_ERROR", "服务器内部错误");
 
     private final String code;
     private final String defaultMessage;
+    private final HttpStatus httpStatus;
 
     ErrorCodeEnums(String code, String defaultMessage) {
+        this(code, defaultMessage, HttpStatus.BAD_REQUEST);
+    }
+
+    ErrorCodeEnums(String code, String defaultMessage, HttpStatus httpStatus) {
         this.code = code;
         this.defaultMessage = defaultMessage;
+        this.httpStatus = httpStatus;
     }
 }
 

@@ -29,7 +29,7 @@ public class GlobalExceptionConfig {
         Map<String, Object> body = new HashMap<>();
         body.put("code", ex.getErrorCode().getCode());
         body.put("message", ex.getMessage());
-        return ResponseEntity.badRequest().body(body);
+        return ResponseEntity.status(ex.getErrorCode().getHttpStatus()).body(body);
     }
 
     /**

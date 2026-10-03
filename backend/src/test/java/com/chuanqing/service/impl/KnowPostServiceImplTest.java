@@ -6,12 +6,14 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import com.chuanqing.service.HotKeyDetectorService;
 import com.chuanqing.config.CachePropertiesConfig;
 import com.chuanqing.service.CounterService;
-import com.chuanqing.service.UserCounterService;
+import com.chuanqing.common.enums.ErrorCodeEnums;
+import com.chuanqing.entity.KnowPostEntity;
+import com.chuanqing.entity.KnowPostLifecycleEventEntity;
+import com.chuanqing.exception.BusinessException;
 import com.chuanqing.vo.FeedPageVO;
 import com.chuanqing.vo.KnowPostDetailVO;
 import com.chuanqing.utils.SnowflakeIdGeneratorUtils;
 import com.chuanqing.mapper.KnowPostMapper;
-import com.chuanqing.service.RagIndexService;
 import com.chuanqing.mapper.OutboxMapper;
 import com.chuanqing.config.OssPropertiesConfig;
 import org.junit.jupiter.api.BeforeEach;
@@ -22,11 +24,13 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.redis.core.SetOperations;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
+import org.springframework.context.ApplicationEventPublisher;
 
 import java.util.List;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -37,6 +41,7 @@ import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import org.mockito.ArgumentCaptor;
 
 @ExtendWith(MockitoExtension.class)
 class KnowPostServiceImplTest {
@@ -46,17 +51,15 @@ class KnowPostServiceImplTest {
     @Mock
     private CounterService counterService;
     @Mock
-    private UserCounterService userCounterService;
-    @Mock
     private StringRedisTemplate redis;
     @Mock
     private SetOperations<String, String> setOperations;
     @Mock
     private ValueOperations<String, String> valueOperations;
     @Mock
-    private RagIndexService ragIndexService;
-    @Mock
     private OutboxMapper outboxMapper;
+    @Mock
+    private ApplicationEventPublisher eventPublisher;
 
     private Cache<String, FeedPageVO> feedPublicCache;
     private Cache<String, KnowPostDetailVO> knowPostDetailCache;
@@ -67,7 +70,9 @@ class KnowPostServiceImplTest {
         feedPublicCache = Caffeine.newBuilder().build();
         knowPostDetailCache = Caffeine.newBuilder().build();
 
-        when(redis.opsForSet()).thenReturn(setOperations);
+        lenient().when(redis.opsForSet()).thenReturn(setOperations);
+        lenient().when(outboxMapper.insert(anyLong(), anyString(), anyLong(), anyString(), anyString()))
+                .thenReturn(1);
 
         CachePropertiesConfig cacheProperties = new CachePropertiesConfig();
         HotKeyDetectorService hotKeyDetector = new HotKeyDetectorService(cacheProperties);
@@ -79,13 +84,12 @@ class KnowPostServiceImplTest {
                 new ObjectMapper(),
                 ossProperties,
                 counterService,
-                userCounterService,
                 redis,
                 feedPublicCache,
                 knowPostDetailCache,
                 hotKeyDetector,
-                ragIndexService,
-                outboxMapper
+                outboxMapper,
+                eventPublisher
         );
 
     }
@@ -140,7 +144,8 @@ class KnowPostServiceImplTest {
 
         when(setOperations.members(indexKey)).thenReturn(Set.of(pageKey));
         when(setOperations.members("feed:public:index:" + postId + ":" + (hourSlot - 1))).thenReturn(Set.of());
-        when(mapper.softDelete(postId, 1L)).thenReturn(1);
+        when(mapper.findById(postId)).thenReturn(post(postId, "draft"));
+        when(mapper.softDelete(postId, 1L, "draft")).thenReturn(1);
 
         service.delete(1L, postId);
 
@@ -372,5 +377,122 @@ class KnowPostServiceImplTest {
         verify(setOperations, never()).remove(anyString(), anyString());
 
         System.out.println("\n🎉 [结论] 空Set优雅处理！不会触发多余的网络请求\n");
+    }
+
+    @Test
+    void publishDraftWritesOutboxAndSchedulesProjectionAfterCommit() {
+        long postId = 2001L;
+        when(mapper.findById(postId)).thenReturn(post(postId, "draft"));
+        when(mapper.publishDraft(postId, 1L)).thenReturn(1);
+
+        service.publish(1L, postId);
+
+        verify(mapper).publishDraft(postId, 1L);
+        verify(outboxMapper).insert(anyLong(), eq("knowpost"), eq(postId),
+                eq("KnowPostPublished"), anyString());
+
+        ArgumentCaptor<Object> eventCaptor = ArgumentCaptor.forClass(Object.class);
+        verify(eventPublisher).publishEvent(eventCaptor.capture());
+        KnowPostLifecycleEventEntity event = (KnowPostLifecycleEventEntity) eventCaptor.getValue();
+        assertThat(event.getPostId()).isEqualTo(postId);
+        assertThat(event.getCreatorId()).isEqualTo(1L);
+        assertThat(event.getPostCountDelta()).isEqualTo(1);
+        assertThat(event.isIndexAfterCommit()).isTrue();
+    }
+
+    @Test
+    void publishAlreadyPublishedIsIdempotent() {
+        long postId = 2002L;
+        when(mapper.findById(postId)).thenReturn(post(postId, "published"));
+
+        service.publish(1L, postId);
+
+        verify(mapper, never()).publishDraft(anyLong(), anyLong());
+        verify(outboxMapper, never()).insert(anyLong(), anyString(), anyLong(), anyString(), anyString());
+        verify(eventPublisher, never()).publishEvent(any());
+    }
+
+    @Test
+    void publishRejectsIncompleteDraft() {
+        long postId = 2003L;
+        KnowPostEntity incomplete = post(postId, "draft");
+        incomplete.setTitle(" ");
+        when(mapper.findById(postId)).thenReturn(incomplete);
+
+        assertThatThrownBy(() -> service.publish(1L, postId))
+                .isInstanceOfSatisfying(BusinessException.class, exception ->
+                        assertThat(exception.getErrorCode()).isEqualTo(ErrorCodeEnums.KNOW_POST_INCOMPLETE));
+
+        verify(mapper, never()).publishDraft(anyLong(), anyLong());
+        verify(outboxMapper, never()).insert(anyLong(), anyString(), anyLong(), anyString(), anyString());
+    }
+
+    @Test
+    void publishRejectsConcurrentStateChange() {
+        long postId = 2004L;
+        when(mapper.findById(postId)).thenReturn(post(postId, "draft"));
+        when(mapper.publishDraft(postId, 1L)).thenReturn(0);
+
+        assertThatThrownBy(() -> service.publish(1L, postId))
+                .isInstanceOfSatisfying(BusinessException.class, exception ->
+                        assertThat(exception.getErrorCode()).isEqualTo(ErrorCodeEnums.KNOW_POST_STATE_CONFLICT));
+
+        verify(outboxMapper, never()).insert(anyLong(), anyString(), anyLong(), anyString(), anyString());
+        verify(eventPublisher, never()).publishEvent(any());
+    }
+
+    @Test
+    void publishPropagatesOutboxFailureAndDoesNotScheduleProjection() {
+        long postId = 2005L;
+        when(mapper.findById(postId)).thenReturn(post(postId, "draft"));
+        when(mapper.publishDraft(postId, 1L)).thenReturn(1);
+        when(outboxMapper.insert(anyLong(), eq("knowpost"), eq(postId),
+                eq("KnowPostPublished"), anyString())).thenThrow(new IllegalStateException("db unavailable"));
+
+        assertThatThrownBy(() -> service.publish(1L, postId))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("db unavailable");
+
+        verify(eventPublisher, never()).publishEvent(any());
+    }
+
+    @Test
+    void deletePublishedPostSchedulesCounterDecrementAfterCommit() {
+        long postId = 2006L;
+        when(mapper.findById(postId)).thenReturn(post(postId, "published"));
+        when(mapper.softDelete(postId, 1L, "published")).thenReturn(1);
+
+        service.delete(1L, postId);
+
+        ArgumentCaptor<Object> eventCaptor = ArgumentCaptor.forClass(Object.class);
+        verify(eventPublisher).publishEvent(eventCaptor.capture());
+        KnowPostLifecycleEventEntity event = (KnowPostLifecycleEventEntity) eventCaptor.getValue();
+        assertThat(event.getPostCountDelta()).isEqualTo(-1);
+        assertThat(event.isIndexAfterCommit()).isFalse();
+    }
+
+    @Test
+    void deleteAlreadyDeletedIsIdempotent() {
+        long postId = 2007L;
+        when(mapper.findById(postId)).thenReturn(post(postId, "deleted"));
+
+        service.delete(1L, postId);
+
+        verify(mapper, never()).softDelete(anyLong(), anyLong(), anyString());
+        verify(outboxMapper, never()).insert(anyLong(), anyString(), anyLong(), anyString(), anyString());
+        verify(eventPublisher, never()).publishEvent(any());
+    }
+
+    private KnowPostEntity post(long postId, String status) {
+        return KnowPostEntity.builder()
+                .id(postId)
+                .creatorId(1L)
+                .status(status)
+                .title("一篇完整知文")
+                .description("这是摘要")
+                .contentObjectKey("posts/1/content.md")
+                .contentUrl("https://example.com/posts/1/content.md")
+                .visible("public")
+                .build();
     }
 }

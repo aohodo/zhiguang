@@ -19,7 +19,7 @@ public interface KnowPostMapper {
 
     int updateMetadata(KnowPostEntity post);
 
-    int publish(@Param("id") Long id, @Param("creatorId") Long creatorId);
+    int publishDraft(@Param("id") Long id, @Param("creatorId") Long creatorId);
 
     // 首页 Feed 列表（已发布、公开可见），置顶优先，其次按发布时间倒序。
     List<KnowPostFeedEntity> listFeedPublic(@Param("limit") int limit,
@@ -37,7 +37,9 @@ public interface KnowPostMapper {
     int updateVisibility(@Param("id") Long id, @Param("creatorId") Long creatorId, @Param("visible") String visible);
 
     // 软删除
-    int softDelete(@Param("id") Long id, @Param("creatorId") Long creatorId);
+    int softDelete(@Param("id") Long id,
+                   @Param("creatorId") Long creatorId,
+                   @Param("expectedStatus") String expectedStatus);
 
     // 详情查询（含作者信息）
     KnowPostDetailEntity findDetailById(@Param("id") Long id);

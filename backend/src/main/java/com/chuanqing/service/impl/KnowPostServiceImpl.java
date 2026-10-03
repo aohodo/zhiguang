@@ -1,35 +1,39 @@
 package com.chuanqing.service.impl;
 
 import com.fasterxml.jackson.core.type.TypeReference;
-import com.chuanqing.service.UserCounterService;
 import com.chuanqing.service.KnowPostService;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.chuanqing.exception.BusinessException;
 import com.chuanqing.common.enums.ErrorCodeEnums;
+import com.chuanqing.common.enums.KnowPostStatusEnums;
+import com.chuanqing.common.enums.KnowPostVisibilityEnums;
 import com.chuanqing.utils.SnowflakeIdGeneratorUtils;
 import com.chuanqing.mapper.KnowPostMapper;
 import com.chuanqing.entity.KnowPostEntity;
 import com.chuanqing.entity.KnowPostDetailEntity;
+import com.chuanqing.entity.KnowPostLifecycleEventEntity;
 import com.chuanqing.vo.FeedPageVO;
 import com.chuanqing.vo.KnowPostDetailVO;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.chuanqing.service.CounterService;
 import com.chuanqing.config.OssPropertiesConfig;
-import com.chuanqing.service.RagIndexService;
 import com.chuanqing.mapper.OutboxMapper;
 import com.chuanqing.service.HotKeyDetectorService;
 import jakarta.annotation.Resource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -45,7 +49,6 @@ public class KnowPostServiceImpl implements KnowPostService {
     private final ObjectMapper objectMapper;
     private final OssPropertiesConfig ossProperties;
     private final CounterService counterService;
-    private final UserCounterService userCounterService;
     private final StringRedisTemplate redis;
     @Qualifier("feedPublicCache")
     private final Cache<String, FeedPageVO> feedPublicCache;
@@ -55,8 +58,8 @@ public class KnowPostServiceImpl implements KnowPostService {
     private static final Logger log = LoggerFactory.getLogger(KnowPostServiceImpl.class);
     private static final int DETAIL_LAYOUT_VER = 1;
     private final ConcurrentHashMap<String, Object> singleFlight = new ConcurrentHashMap<>();
-    private final RagIndexService ragIndexService;
     private final OutboxMapper outboxMapper;
+    private final ApplicationEventPublisher eventPublisher;
 
     // 手动编写构造器，Spring的@Qualifier直接标注在参数上（核心）
     public KnowPostServiceImpl(
@@ -65,26 +68,24 @@ public class KnowPostServiceImpl implements KnowPostService {
             ObjectMapper objectMapper,
             OssPropertiesConfig ossProperties,
             CounterService counterService,
-            UserCounterService userCounterService,
             StringRedisTemplate redis,
             @Qualifier("feedPublicCache") Cache<String, FeedPageVO> feedPublicCache,
             @Qualifier("knowPostDetailCache") Cache<String, KnowPostDetailVO> knowPostDetailCache,
             HotKeyDetectorService hotKey,
-            RagIndexService ragIndexService,
-            OutboxMapper outboxMapper
+            OutboxMapper outboxMapper,
+            ApplicationEventPublisher eventPublisher
     ) {
         this.mapper = mapper;
         this.idGen = idGen;
         this.objectMapper = objectMapper;
         this.ossProperties = ossProperties;
         this.counterService = counterService;
-        this.userCounterService = userCounterService;
         this.redis = redis;
         this.feedPublicCache = feedPublicCache;
         this.knowPostDetailCache = knowPostDetailCache; // 带@Qualifier的参数赋值
         this.hotKey = hotKey;
-        this.ragIndexService = ragIndexService;
         this.outboxMapper = outboxMapper;
+        this.eventPublisher = eventPublisher;
     }
     /**
      * 创建草稿并返回新 ID。
@@ -96,9 +97,9 @@ public class KnowPostServiceImpl implements KnowPostService {
         KnowPostEntity post = KnowPostEntity.builder()
                 .id(id)
                 .creatorId(creatorId)
-                .status("draft")
+                .status(KnowPostStatusEnums.DRAFT.getValue())
                 .type("image_text")
-                .visible("public")
+                .visible(KnowPostVisibilityEnums.PUBLIC.getValue())
                 .isTop(false)
                 .createTime(now)
                 .updateTime(now)
@@ -133,12 +134,6 @@ public class KnowPostServiceImpl implements KnowPostService {
 
         invalidateCache(id);
 
-        // 触发一次预索引（草稿阶段可能因可见性/状态被跳过）
-        try {
-            ragIndexService.ensureIndexed(id);
-        } catch (Exception e) {
-            log.warn("Pre-index after content confirm failed, post {}: {}", id, e.getMessage());
-        }
     }
 
     /**
@@ -148,6 +143,8 @@ public class KnowPostServiceImpl implements KnowPostService {
     public void updateMetadata(long creatorId, long id, String title, Long tagId, List<String> tags, List<String> imgUrls, String visible, Boolean isTop, String description) {
         invalidateCache(id);
 
+        String normalizedVisibility = visible == null ? null : parseVisibility(visible).getValue();
+
         KnowPostEntity post = KnowPostEntity.builder()
                 .id(id)
                 .creatorId(creatorId)
@@ -155,7 +152,7 @@ public class KnowPostServiceImpl implements KnowPostService {
                 .tagId(tagId)
                 .tags(toJsonOrNull(tags))
                 .imgUrls(toJsonOrNull(imgUrls))
-                .visible(visible)
+                .visible(normalizedVisibility)
                 .isTop(isTop)
                 .description(description)
                 .type("image_text")
@@ -168,14 +165,7 @@ public class KnowPostServiceImpl implements KnowPostService {
             throw new BusinessException(ErrorCodeEnums.BAD_REQUEST, "草稿不存在或无权限");
         }
 
-        // 元数据变更后写入 Outbox 事件，驱动搜索索引更新
-        try {
-            long outId = idGen.nextId();
-            String payload = objectMapper.writeValueAsString(Map.of("entity", "knowpost", "op", "upsert", "id", id));
-            outboxMapper.insert(outId, "knowpost", id, "KnowPostMetadataUpdated", payload);
-        } catch (Exception e) {
-            log.warn("Outbox event after metadata update failed, post {}: {}", id, e.getMessage());
-        }
+        writeOutbox(id, "upsert", "KnowPostMetadataUpdated");
 
         invalidateCache(id);
     }
@@ -185,30 +175,34 @@ public class KnowPostServiceImpl implements KnowPostService {
      */
     @Transactional
     public void publish(long creatorId, long id) {
-        int updated = mapper.publish(id, creatorId);
+        KnowPostEntity post = requireOwnedPost(creatorId, id);
+        KnowPostStatusEnums currentStatus = parseStatus(post.getStatus());
+
+        if (currentStatus == KnowPostStatusEnums.PUBLISHED) {
+            return;
+        }
+        if (currentStatus != KnowPostStatusEnums.DRAFT) {
+            throw new BusinessException(
+                    ErrorCodeEnums.KNOW_POST_STATE_CONFLICT,
+                    "只有草稿状态的知文可以发布"
+            );
+        }
+
+        validatePublishable(post);
+
+        int updated = mapper.publishDraft(id, creatorId);
 
         if (updated == 0) {
-            throw new BusinessException(ErrorCodeEnums.BAD_REQUEST, "草稿不存在或无权限");
-        }
-        try {
-            userCounterService.incrementPosts(creatorId, 1);
-        } catch (Exception ignored) {}
-
-        // 写入 Outbox 事件，驱动搜索索引增量更新
-        try {
-            long outId = idGen.nextId();
-            String payload = objectMapper.writeValueAsString(Map.of("entity", "knowpost", "op", "upsert", "id", id));
-            outboxMapper.insert(outId, "knowpost", id, "KnowPostPublished", payload);
-        } catch (Exception e) {
-            log.warn("Outbox event after publish failed, post {}: {}", id, e.getMessage());
+            throw new BusinessException(
+                    ErrorCodeEnums.KNOW_POST_STATE_CONFLICT,
+                    "知文状态已发生变化，请刷新后重试"
+            );
         }
 
-        // 发布成功后触发一次预索引，减少首次问答冷启动
-        try {
-            ragIndexService.ensureIndexed(id);
-        } catch (Exception e) {
-            log.warn("Pre-index after publish failed, post {}: {}", id, e.getMessage());
-        }
+        writeOutbox(id, "upsert", "KnowPostPublished");
+        eventPublisher.publishEvent(new KnowPostLifecycleEventEntity(id, creatorId, 1, true));
+
+        invalidateCache(id);
     }
 
     /**
@@ -232,13 +226,11 @@ public class KnowPostServiceImpl implements KnowPostService {
      */
     @Transactional
     public void updateVisibility(long creatorId, long id, String visible) {
-        if (!isValidVisible(visible)) {
-            throw new BusinessException(ErrorCodeEnums.BAD_REQUEST, "可见性取值非法");
-        }
+        String normalizedVisibility = parseVisibility(visible).getValue();
 
         invalidateCache(id);
 
-        int updated = mapper.updateVisibility(id, creatorId, visible);
+        int updated = mapper.updateVisibility(id, creatorId, normalizedVisibility);
 
         if (updated == 0) {
             throw new BusinessException(ErrorCodeEnums.BAD_REQUEST, "草稿不存在或无权限");
@@ -252,34 +244,100 @@ public class KnowPostServiceImpl implements KnowPostService {
      */
     @Transactional
     public void delete(long creatorId, long id) {
-        invalidateCache(id);
+        KnowPostEntity post = requireOwnedPost(creatorId, id);
+        KnowPostStatusEnums currentStatus = parseStatus(post.getStatus());
 
-        int updated = mapper.softDelete(id, creatorId);
-        if (updated == 0) {
-            throw new BusinessException(ErrorCodeEnums.BAD_REQUEST, "草稿不存在或无权限");
+        if (currentStatus == KnowPostStatusEnums.DELETED) {
+            return;
         }
 
-        // 写入 Outbox 事件，驱动搜索索引软删
-        try {
-            long outId = idGen.nextId();
-            String payload = objectMapper.writeValueAsString(Map.of("entity", "knowpost", "op", "delete", "id", id));
-            outboxMapper.insert(outId, "knowpost", id, "KnowPostDeleted", payload);
-        } catch (Exception e) {
-            log.warn("Outbox event after delete failed, post {}: {}", id, e.getMessage());
+        invalidateCache(id);
+
+        int updated = mapper.softDelete(id, creatorId, currentStatus.getValue());
+        if (updated == 0) {
+            throw new BusinessException(
+                    ErrorCodeEnums.KNOW_POST_STATE_CONFLICT,
+                    "知文状态已发生变化，请刷新后重试"
+            );
+        }
+
+        writeOutbox(id, "delete", "KnowPostDeleted");
+
+        if (currentStatus == KnowPostStatusEnums.PUBLISHED) {
+            eventPublisher.publishEvent(new KnowPostLifecycleEventEntity(id, creatorId, -1, false));
         }
 
         invalidateCache(id);
     }
 
-    private boolean isValidVisible(String visible) {
-        if (visible == null) {
-            return false;
+    private KnowPostEntity requireOwnedPost(long creatorId, long id) {
+        KnowPostEntity post = mapper.findById(id);
+        if (post == null) {
+            throw new BusinessException(ErrorCodeEnums.KNOW_POST_NOT_FOUND);
         }
+        if (post.getCreatorId() == null || !post.getCreatorId().equals(creatorId)) {
+            throw new BusinessException(ErrorCodeEnums.KNOW_POST_FORBIDDEN);
+        }
+        return post;
+    }
 
-        return switch (visible) {
-            case "public", "followers", "school", "private", "unlisted" -> true;
-            default -> false;
-        };
+    private void validatePublishable(KnowPostEntity post) {
+        if (post.getTitle() == null || post.getTitle().isBlank()) {
+            throw new BusinessException(ErrorCodeEnums.KNOW_POST_INCOMPLETE, "发布前必须填写标题");
+        }
+        if (post.getContentObjectKey() == null || post.getContentObjectKey().isBlank()
+                || post.getContentUrl() == null || post.getContentUrl().isBlank()) {
+            throw new BusinessException(ErrorCodeEnums.KNOW_POST_INCOMPLETE, "发布前必须上传并确认正文");
+        }
+        if (post.getDescription() == null || post.getDescription().isBlank()) {
+            throw new BusinessException(ErrorCodeEnums.KNOW_POST_INCOMPLETE, "发布前必须填写摘要");
+        }
+        if (post.getDescription().codePointCount(0, post.getDescription().length()) > 50) {
+            throw new BusinessException(ErrorCodeEnums.KNOW_POST_INCOMPLETE, "摘要不能超过 50 个字符");
+        }
+        parseVisibility(post.getVisible());
+    }
+
+    private KnowPostStatusEnums parseStatus(String status) {
+        try {
+            return KnowPostStatusEnums.fromValue(status);
+        } catch (IllegalArgumentException e) {
+            throw new BusinessException(ErrorCodeEnums.KNOW_POST_STATE_CONFLICT, "未知的知文状态");
+        }
+    }
+
+    private KnowPostVisibilityEnums parseVisibility(String visible) {
+        try {
+            return KnowPostVisibilityEnums.fromValue(visible);
+        } catch (IllegalArgumentException e) {
+            throw new BusinessException(ErrorCodeEnums.BAD_REQUEST, "可见性取值非法");
+        }
+    }
+
+    private void writeOutbox(long postId, String operation, String eventType) {
+        long eventId = idGen.nextId();
+        try {
+            Map<String, Object> eventPayload = new LinkedHashMap<>();
+            eventPayload.put("eventId", eventId);
+            eventPayload.put("eventType", eventType);
+            eventPayload.put("eventVersion", 1);
+            eventPayload.put("occurredAt", Instant.now().toString());
+            eventPayload.put("entity", "knowpost");
+            eventPayload.put("op", operation);
+            eventPayload.put("id", postId);
+            String traceId = MDC.get("traceId");
+            if (traceId != null && !traceId.isBlank()) {
+                eventPayload.put("traceId", traceId);
+            }
+
+            String payload = objectMapper.writeValueAsString(eventPayload);
+            int inserted = outboxMapper.insert(eventId, "knowpost", postId, eventType, payload);
+            if (inserted != 1) {
+                throw new IllegalStateException("知文事件写入失败");
+            }
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("知文事件序列化失败", e);
+        }
     }
 
     private String toJsonOrNull(List<String> list) {
