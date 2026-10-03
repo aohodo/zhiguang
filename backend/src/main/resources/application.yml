@@ -112,7 +112,7 @@ auth:
 logging:
   level:
     root: INFO
-    '[com.tongji]': DEBUG
+    '[com.chuanqing]': DEBUG
 
 oss:
   endpoint: ${OSS_ENDPOINT:oss-cn-beijing.aliyuncs.com}

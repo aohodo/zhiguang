@@ -11,7 +11,7 @@
         <relativePath/>
     </parent>
 
-    <groupId>org.example</groupId>
+    <groupId>com.chuanqing</groupId>
     <artifactId>zhiguang</artifactId>
     <version>1.0-SNAPSHOT</version>
     <name>zhiguang</name>
@@ -237,7 +237,7 @@
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
                 <configuration>
-                    <mainClass>com.tongji.ZhiGuangApplication</mainClass>
+                    <mainClass>com.chuanqing.ZhiGuangApplication</mainClass>
                 </configuration>
             </plugin>
         </plugins>
