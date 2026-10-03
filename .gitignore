@@ -1,0 +1,25 @@
+# Local secrets
+.env
+.env.*
+!.env.example
+**/src/main/resources/keys/private.pem
+
+# Runtime data kept on E: but never committed
+.docker-data/**
+!.docker-data/.gitignore
+
+# Java / frontend build output
+**/target/
+**/node_modules/
+**/dist/
+
+# IDE and OS files
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# Source archives retained locally
+backend/*.zip
+frontend/*.zip
